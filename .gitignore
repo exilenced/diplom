@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+env/
+venv/
+.env
+.venv
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# VS Code
+.vscode/
+!.vscode/launch.json
+!.vscode/settings.json
+*.code-workspace
+
+# Данные (чтобы не пушить большие файлы)
+data/
+!data/.gitkeep
+
+# Модели (бинарные файлы)
+models/
+!models/.gitkeep
+
+# Power BI
+*.pbix
+!dashboard/*.pbix
+dashboard/.DS_Store
+
+# SQL (если есть временные файлы)
+*.sqlite
+*.db
+
+# Логи
+*.log
+logs/
+
+# Conda environment
+environment.yml
+conda-env/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Проект-специфичные
+*.bak
+*.tmp
+*.swp
+*.swo
+*~
