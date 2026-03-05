@@ -92,5 +92,8 @@ class DatabaseConnection:
         except Exception as e:
             logger.error(f"failed to load data into {table_name}: {e}")
             return False
+    @property
+    def connection_url(self) -> str:
+        return str(self.engine.url) if self.engine else None
 
 db = DatabaseConnection()

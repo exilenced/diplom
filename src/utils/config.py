@@ -3,7 +3,6 @@ import os
 from dotenv import load_dotenv
 from pathlib import Path
 
-# Загружаем .env файл из корня проекта
 env_path = Path(__file__).parent.parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
 
@@ -16,7 +15,7 @@ class Config:
     DB_PASSWORD = os.getenv('DB_PASSWORD', '')
     
     # Project
-    PROJECT_NAME = os.getenv('PROJECT_NAME', 'diploma-taxitelecom')
+    PROJECT_NAME = os.getenv('PROJECT_NAME', 'diplom')
     ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
     LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
     
@@ -35,8 +34,6 @@ class Config:
         """URL для psycopg2 (без экранирования)"""
         return f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
 
-# Создаем глобальный экземпляр
 config = Config()
 
-# Создаем папку для логов, если нет
 config.LOG_DIR.mkdir(parents=True, exist_ok=True)

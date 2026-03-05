@@ -1,282 +1,430 @@
 # src/data_generation/generate_data.py
-import pandas as pd
-import numpy as np
-from faker import Faker
-from datetime import datetime, timedelta
 import random
-import uuid
-import os
-from pathlib import Path
+import numpy as np
+from datetime import datetime, timedelta, date
+from typing import List, Tuple, Optional
+import pandas as pd
+from faker import Faker
+from tqdm import tqdm
+import logging
 
-DATA_DIR = os.environ.get('DATA_DIR', 'data/generated')
+from src.models import Driver, Trip, DriverActivity
+from src.utils.config import config
 
-FAKER_SEED = 42
-RANDOM_SEED = 42
-NP_RANDOM_SEED = 42
-
+logger = logging.getLogger(__name__)
 fake = Faker('ru_RU')
-Faker.seed(FAKER_SEED)
-random.seed(RANDOM_SEED)
-np.random.seed(NP_RANDOM_SEED)
 
-CITIES = ['Москва', 'Санкт-Петербург', 'Казань', 'Екатеринбург', 'Новосибирск', 'Тюмень']
+CITIES = ['Москва', 'Санкт-Петербург', 'Казань', 'Екатеринбург', 'Новосибирск']
 STATUSES = ['active', 'inactive', 'blocked']
-STATUS_WEIGHTS = [0.7, 0.25, 0.05]  # 70% активных, 25% неактивных, 5% заблокированных
+CITY_MULTIPLIERS = {
+    'Москва': 2.0,
+    'Санкт-Петербург': 1.5,
+    'Казань': 1.2,
+    'Екатеринбург': 1.1,
+    'Новосибирск': 1.0
+}
 
-CITY_WEIGHTS = [0.3, 0.2, 0.15, 0.15, 0.1, 0.1]
-
-def generate_drivers(n=5000):
+class DataGenerator:
     """
-    Генерирует DataFrame с водителями и возвращает список сгенерированных ID
+    Генератор синтетических данных с контролируемым оттоком
     """
-    print(f"generating {n} drivers...")
     
-    drivers = []
-    driver_ids = []
+    def __init__(self, seed: int = 42):
+        random.seed(seed)
+        np.random.seed(seed)
+        fake.seed_instance(seed)
+        self.current_date = datetime.now()
     
-    for i in range(n):
-        driver_id = str(uuid.uuid4())
-        driver_ids.append(driver_id)
-
-        phone = fake.phone_number()
-
-        city = random.choices(CITIES, weights=CITY_WEIGHTS)[0]
-
+    def generate_driver(self, is_churned: bool = False) -> Driver:
+        """
+        Генерация одного водителя с возможностью задать статус оттока
+        """
+        city = random.choice(CITIES)
+        
+        # Регистрация от 1 до 2 лет назад
         registration_date = fake.date_time_between(
-            start_date='-2y', 
-            end_date='now'
+            start_date='-2y',
+            end_date='-60d'
         )
-
-        status = random.choices(STATUSES, weights=STATUS_WEIGHTS)[0]
-
-        rating = round(np.random.normal(4.5, 0.3), 2)
-        rating = max(3.0, min(5.0, rating))
-
-        total_trips = 0
         
-        drivers.append({
-            'driver_id': driver_id,
-            'name': fake.name(),
-            'phone': phone,
-            'city': city,
-            'registration_date': registration_date,
-            'status': status,
-            'rating': rating,
-            'total_trips': total_trips
-        })
+        # Определяем статус на основе флага оттока
+        if is_churned:
+            status = 'inactive'
+            # Ушедшие водители имеют чуть ниже рейтинг
+            rating = round(random.uniform(3.2, 4.5), 2)
+        else:
+            status = random.choices(
+                ['active', 'inactive', 'blocked'],
+                weights=[0.85, 0.1, 0.05]
+            )[0]
+            rating = round(random.uniform(3.8, 5.0), 2)
+        
+        return Driver(
+            name=fake.name(),
+            phone=fake.unique.phone_number(),
+            city=city,
+            registration_date=registration_date,
+            status=status,
+            rating=rating,
+            total_trips=0  # будет обновлено позже
+        )
     
-    df = pd.DataFrame(drivers)
-    print(f"generated {len(df)} drivers")
-    print(f"generated {len(driver_ids)} unique IDs")
-    return df, driver_ids
-
-def generate_trips(driver_ids, n=50000):
-    """
-    Генерирует поездки для водителей, используя ТОЛЬКО переданные driver_ids
-    """
-    print(f"generating {n} trips...")
+    def generate_drivers(
+        self, 
+        n: int, 
+        churn_rate: float = 0.2,
+        city_churn_weights: Optional[dict] = None
+    ) -> List[Driver]:
+        """
+        Генерация списка водителей с контролируемым оттоком
+        
+        Args:
+            n: количество водителей
+            churn_rate: желаемый процент ушедших водителей
+            city_churn_weights: веса оттока по городам (для реализма)
+        """
+        fake.unique.clear()
+        drivers = []
+        
+        # По умолчанию: в Москве меньше отток, в регионах больше
+        if city_churn_weights is None:
+            city_churn_weights = {
+                'Москва': 0.1,
+                'Санкт-Петербург': 0.15,
+                'Казань': 0.2,
+                'Екатеринбург': 0.22,
+                'Новосибирск': 0.25
+            }
+        
+        # Определяем, сколько водителей должно быть ушедшими в каждом городе
+        city_counts = {city: 0 for city in CITIES}
+        churned_by_city = {city: 0 for city in CITIES}
+        
+        # Распределяем водителей по городам
+        for _ in range(n):
+            city = random.choice(CITIES)
+            city_counts[city] += 1
+        
+        # Рассчитываем целевое количество ушедших по городам
+        for city in CITIES:
+            target_churned = int(city_counts[city] * city_churn_weights[city])
+            churned_by_city[city] = target_churned
+        
+        # Генерируем водителей
+        for city in CITIES:
+            for i in range(city_counts[city]):
+                # Этот водитель будет ушедшим?
+                is_churned = i < churned_by_city[city]
+                driver = self.generate_driver(is_churned)
+                # Важно: город может измениться в generate_driver, поэтому устанавливаем явно
+                driver.city = city
+                drivers.append(driver)
+        
+        # Перемешиваем, чтобы ушедшие не были сгруппированы
+        random.shuffle(drivers)
+        
+        logger.info(f"Generated {len(drivers)} drivers with overall churn rate: "
+                   f"{sum(1 for d in drivers if d.status == 'inactive')/len(drivers):.2%}")
+        
+        return drivers
     
-    trips = []
-    
-    if not driver_ids:
-        print("no driver_ids to generate trips")
-        return pd.DataFrame()
-    
-    print(f"using pool of {len(driver_ids)} drivers")
-
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=180)
-
-    driver_trip_counts = {did: 0 for did in driver_ids}
-    
-    for i in range(n):
-        driver_id = random.choice(driver_ids)
-        driver_trip_counts[driver_id] += 1
-
-        trip_date = fake.date_time_between(start_date=start_date, end_date=end_date)
-
-        city = random.choices(CITIES, weights=CITY_WEIGHTS)[0]
-
-        distance_km = round(np.random.lognormal(mean=2.0, sigma=0.7), 1)
-        distance_km = max(0.5, min(100, distance_km))
-
-        duration_min = int(distance_km * 3 + np.random.normal(0, 5))
-        duration_min = max(5, duration_min)
-
-        fare_amount = round(40 * distance_km + np.random.normal(50, 20), 2)
-        fare_amount = max(100, fare_amount)
-
-        commission_rate = random.uniform(0.15, 0.25)
-        commission = round(fare_amount * commission_rate, 2)
+    def generate_trip(self, driver: Driver, trip_date: datetime = None) -> Trip:
+        """
+        Генерация одной поездки
+        """
+        if trip_date is None:
+            trip_date = fake.date_time_between(
+                start_date=driver.registration_date,
+                end_date='now'
+            )
+        
+        base_fare = random.uniform(200, 800)
+        city_multiplier = CITY_MULTIPLIERS[driver.city]
+        
+        distance = random.uniform(2, 50)
+        duration = int(distance * random.uniform(2, 5))
+        
+        fare_amount = round(base_fare * city_multiplier, 2)
+        commission = round(fare_amount * random.uniform(0.1, 0.2), 2)
         driver_payout = round(fare_amount - commission, 2)
-
-        rating = round(np.random.normal(4.7, 0.2), 2)
-        rating = max(1.0, min(5.0, rating))
         
-        trips.append({
-            'trip_id': str(uuid.uuid4()),
-            'driver_id': driver_id,
-            'trip_date': trip_date,
-            'city': city,
-            'distance_km': distance_km,
-            'duration_min': duration_min,
-            'fare_amount': fare_amount,
-            'commission': commission,
-            'driver_payout': driver_payout,
-            'rating': rating
-        })
+        # Оценка зависит от рейтинга водителя
+        if random.random() < 0.7:
+            # Водители с высоким рейтингом получают хорошие оценки
+            rating = max(1, min(5, round(random.gauss(driver.rating, 0.3), 1)))
+        else:
+            rating = None
+        
+        return Trip(
+            driver_id=driver.driver_id,
+            city=driver.city,
+            distance_km=round(distance, 1),
+            duration_min=duration,
+            fare_amount=fare_amount,
+            commission=commission,
+            driver_payout=driver_payout,
+            rating=rating,
+            trip_date=trip_date
+        )
     
-    df = pd.DataFrame(trips)
-
-    active_drivers = sum(1 for count in driver_trip_counts.values() if count > 0)
-    print(f"generated {len(df)} trips")
-    print(f"active drivers: {active_drivers} out of {len(driver_ids)}")
-    print(f"avg trips per driver: {n/active_drivers:.1f}")
+    def generate_trips_for_driver(
+        self,
+        driver: Driver,
+        n_trips: int,
+        end_date: Optional[datetime] = None
+    ) -> List[Trip]:
+        """
+        Генерация поездок для одного водителя с возможностью задать конечную дату
+        """
+        if end_date is None:
+            end_date = self.current_date
+        
+        trips = []
+        start_date = driver.registration_date
+        
+        # Если водитель ушедший, его последняя поездка была 31-90 дней назад
+        if driver.status == 'inactive':
+            # Сдвигаем end_date в прошлое
+            days_since_last_trip = random.randint(31, 90)
+            end_date = self.current_date - timedelta(days=days_since_last_trip)
+        
+        for _ in range(n_trips):
+            trip_date = fake.date_time_between(
+                start_date=start_date,
+                end_date=end_date
+            )
+            trips.append(self.generate_trip(driver, trip_date))
+        
+        trips.sort(key=lambda x: x.trip_date)
+        return trips
     
-    return df
+    def generate_trips(
+        self,
+        drivers: List[Driver],
+        total_trips: int
+    ) -> List[Trip]:
+        """
+        Генерация поездок для всех водителей с учетом их статуса
+        """
+        all_trips = []
+        
+        # Активные водители получают больше поездок
+        driver_weights = []
+        for driver in drivers:
+            if driver.status == 'active':
+                # Активные: вес 2-5 в зависимости от рейтинга
+                weight = 2 + int(driver.rating * 10)
+            elif driver.status == 'inactive':
+                # Ушедшие: вес 0.2-0.5 (мало поездок, все в прошлом)
+                weight = 0.2 + (driver.rating / 10)
+            else:  # blocked
+                weight = 0.1
+            
+            driver_weights.append(weight)
+        
+        # Нормализуем веса
+        total_weight = sum(driver_weights)
+        driver_trip_counts = [
+            int((w / total_weight) * total_trips)
+            for w in driver_weights
+        ]
+        
+        # Генерируем поездки
+        for driver, n_trips in tqdm(
+            zip(drivers, driver_trip_counts),
+            desc="Generating trips",
+            total=len(drivers)
+        ):
+            if n_trips > 0:
+                trips = self.generate_trips_for_driver(driver, n_trips)
+                all_trips.extend(trips)
+                
+                # Обновляем total_trips у водителя
+                driver.total_trips += n_trips
+        
+        return all_trips
+    
+    def generate_activity(
+        self,
+        drivers: List[Driver],
+        trips: List[Trip]
+    ) -> List[DriverActivity]:
+        """
+        Генерация дневной активности на основе поездок
+        """
+        from collections import defaultdict
+        
+        trips_by_driver_day = defaultdict(list)
+        
+        for trip in trips:
+            trip_date = trip.trip_date.date()
+            trips_by_driver_day[(trip.driver_id, trip_date)].append(trip)
+        
+        activities = []
+        
+        for (driver_id, day), day_trips in tqdm(
+            trips_by_driver_day.items(),
+            desc="Generating activities"
+        ):
+            driver = next(d for d in drivers if d.driver_id == driver_id)
+            
+            n_trips = len(day_trips)
+            total_earnings = sum(t.driver_payout for t in day_trips)
+            
+            online_hours = n_trips * random.uniform(0.3, 0.6)
+            
+            # Активные водители лучше принимают заказы
+            if driver.status == 'active':
+                acceptance_rate = random.uniform(0.85, 0.98)
+            else:
+                acceptance_rate = random.uniform(0.7, 0.9)
+            
+            total_orders = int(n_trips / acceptance_rate)
+            accepted = n_trips
+            rejected = total_orders - n_trips
+            
+            activity = DriverActivity(
+                driver_id=driver_id,
+                date=day,
+                trips_count=n_trips,
+                online_hours=round(online_hours, 1),
+                earnings=round(total_earnings, 2),
+                accepted_orders=accepted,
+                rejected_orders=rejected
+            )
+            activities.append(activity)
+        
+        return activities
+    
+    def add_churn_column(self, drivers: List[Driver], trips: List[Trip]) -> pd.DataFrame:
+        """
+        Добавляет целевую переменную is_churn в датафрейм водителей
+        """
+        # Преобразуем водителей в DataFrame
+        df_drivers = pd.DataFrame([d.to_dict() for d in drivers])
+        
+        # Группируем поездки по водителям, находим последнюю дату
+        if trips:
+            df_trips = pd.DataFrame([t.to_dict() for t in trips])
+            last_trip_dates = df_trips.groupby('driver_id')['trip_date'].max().reset_index()
+            last_trip_dates.columns = ['driver_id', 'last_trip_date']
+            
+            # Объединяем с водителями
+            df_drivers = df_drivers.merge(last_trip_dates, on='driver_id', how='left')
+        else:
+            df_drivers['last_trip_date'] = None
+        
+        # Определяем churn: нет поездок в последние 30 дней
+        df_drivers['days_since_last_trip'] = (
+            self.current_date - pd.to_datetime(df_drivers['last_trip_date'])
+        ).dt.days
+        
+        # Если нет поездок вообще или последняя была >30 дней назад
+        df_drivers['is_churn'] = (
+            df_drivers['days_since_last_trip'].isna() | 
+            (df_drivers['days_since_last_trip'] > 30)
+        ).astype(int)
+        
+        # Логируем распределение
+        churn_counts = df_drivers['is_churn'].value_counts()
+        logger.info(f"Churn distribution: {churn_counts.to_dict()}")
+        logger.info(f"Churn rate: {df_drivers['is_churn'].mean():.2%}")
+        
+        return df_drivers
+    
+    def save_to_csv(
+        self,
+        drivers: List[Driver],
+        trips: List[Trip],
+        activities: List[DriverActivity],
+        output_dir: str
+    ):
+        """
+        Сохранение данных в CSV
+        """
+        import os
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Сохраняем основные данные
+        pd.DataFrame([d.to_dict() for d in drivers]).to_csv(
+            f"{output_dir}/drivers.csv",
+            index=False
+        )
+        
+        pd.DataFrame([t.to_dict() for t in trips]).to_csv(
+            f"{output_dir}/trips.csv",
+            index=False
+        )
+        
+        pd.DataFrame([a.to_dict() for a in activities]).to_csv(
+            f"{output_dir}/driver_activity.csv",
+            index=False
+        )
+        
+        # Сохраняем датафрейм с целевой переменной для ML
+        df_with_churn = self.add_churn_column(drivers, trips)
+        df_with_churn.to_csv(
+            f"{output_dir}/drivers_with_churn.csv",
+            index=False
+        )
+        
+        logger.info(f"Saved {len(drivers)} drivers, {len(trips)} trips, {len(activities)} activities")
+        logger.info(f"ML-ready data saved to {output_dir}/drivers_with_churn.csv")
 
-def generate_driver_activity(driver_ids, trips_df):
+def main(
+    n_drivers: int = 1000,
+    n_trips: int = 50000,
+    churn_rate: float = 0.2,
+    output_dir: Optional[str] = None
+):
     """
-    Агрегирует поездки в дневную активность водителей
-    Использует временную колонку, чтобы не изменять исходный trips_df
+    Основная функция генерации с контролируемым оттоком
+    
+    Args:
+        n_drivers: количество водителей
+        n_trips: общее количество поездок
+        churn_rate: желаемый процент ушедших водителей
+        output_dir: директория для сохранения (по умолчанию config.DATA_DIR)
     """
-    print("generating drivers daily activity")
+    if output_dir is None:
+        output_dir = config.DATA_DIR
     
-    if trips_df.empty:
-        print("no trips to generate activity")
-        return pd.DataFrame()
-
-    trips_with_date = trips_df.copy()
-    trips_with_date['_temp_date'] = pd.to_datetime(trips_with_date['trip_date']).dt.date
-
-    activity = trips_with_date.groupby(['driver_id', '_temp_date']).agg({
-        'duration_min': 'sum',
-        'driver_payout': 'sum',
-        'trip_id': 'count'
-    }).rename(columns={
-        'duration_min': 'online_hours',
-        'driver_payout': 'earnings',
-        'trip_id': 'trips_count'
-    }).reset_index()
-
-    activity.rename(columns={'_temp_date': 'date'}, inplace=True)
-
-    activity['online_hours'] = (activity['online_hours'] / 60).round(2)
-
-    np.random.seed(NP_RANDOM_SEED)
-    activity['accepted_orders'] = activity['trips_count'] + np.random.poisson(2, len(activity))
-    activity['rejected_orders'] = np.random.poisson(1, len(activity))
-
-    activity['activity_id'] = [str(uuid.uuid4()) for _ in range(len(activity))]
-
-    activity = activity[[
-        'activity_id', 'driver_id', 'date', 'trips_count', 
-        'online_hours', 'earnings', 'accepted_orders', 'rejected_orders'
-    ]]
-
-    activity_drivers = set(activity['driver_id'].unique())
-    valid_drivers = set(driver_ids)
-    invalid_drivers = activity_drivers - valid_drivers
+    generator = DataGenerator()
     
-    if invalid_drivers:
-        print(f"found {len(invalid_drivers)} invalid driver_ids in activity, filtering...")
-        activity = activity[activity['driver_id'].isin(valid_drivers)]
+    print(f"Generating {n_drivers} drivers with target churn rate: {churn_rate:.1%}")
+    drivers = generator.generate_drivers(n_drivers, churn_rate=churn_rate)
     
-    print(f"generated {len(activity)} activities")
-    print(f"included: {len(activity['driver_id'].unique())} drivers")
+    print(f"Generating {n_trips} trips...")
+    trips = generator.generate_trips(drivers, n_trips)
     
-    return activity
-
-def save_to_csv(df, filename, folder=None):
-    """
-    Сохраняет DataFrame в CSV
-    """
-    if folder is None:
-        folder = DATA_DIR
-
-    Path(folder).mkdir(parents=True, exist_ok=True)
-
-    filepath = os.path.join(folder, filename)
-
-    df.to_csv(filepath, index=False, encoding='utf-8')
-    print(f"saved to {filepath} ({len(df):,} rows)")
-
-def verify_consistency(drivers_df, trips_df, activity_df):
-    """
-    Проверяет консистентность данных между файлами
-    """
-    print("\nconsistency check")
+    print("Generating activities...")
+    activities = generator.generate_activity(drivers, trips)
     
-    drivers_ids = set(drivers_df['driver_id'])
-    trips_ids = set(trips_df['driver_id'].unique())
-    activity_ids = set(activity_df['driver_id'].unique())
+    # Сохраняем данные
+    generator.save_to_csv(drivers, trips, activities, output_dir)
     
-    print(f"unique driver_id in drivers: {len(drivers_ids):,}")
-    print(f"unique driver_id in trips: {len(trips_ids):,}")
-    print(f"unique driver_id in activity: {len(activity_ids):,}")
-
-    missing_in_drivers = trips_ids - drivers_ids
-    if missing_in_drivers:
-        print(f"error: {len(missing_in_drivers)} driver_id from trips are in drivers")
-        print(f"examples: {list(missing_in_drivers)[:3]}")
-    else:
-        print(f"all driver_ids from trips are in drivers")
-
-    missing_in_activity = activity_ids - drivers_ids
-    if missing_in_activity:
-        print(f"error: {len(missing_in_activity)} driver_id from activity aren't in drivers")
-        print(f"examples: {list(missing_in_activity)[:3]}")
-    else:
-        print(f"all driver_id from activity are in drivers")
-
-    duplicate_phones = drivers_df[drivers_df.duplicated('phone', keep=False)]
-    if not duplicate_phones.empty:
-        print(f"error: found {len(duplicate_phones)} phone duplicates")
-    else:
-        print(f"all phones are unique")
+    print(f"\n✅ Data generation complete!")
+    print(f"  - Drivers: {len(drivers)}")
+    print(f"  - Trips: {len(trips)}")
+    print(f"  - Activities: {len(activities)}")
+    print(f"  - Saved to: {output_dir}")
     
-    return len(missing_in_drivers) == 0 and len(missing_in_activity) == 0 and duplicate_phones.empty
-
-def main():
-
-    print("test data generation start")
-
-    N_DRIVERS = 5000
-    N_TRIPS = 50000
-
-    drivers_df, driver_ids = generate_drivers(N_DRIVERS)
-
-    trips_df = generate_trips(driver_ids, N_TRIPS)
-
-    trips_per_driver = trips_df.groupby('driver_id').size()
-    drivers_df['total_trips'] = drivers_df['driver_id'].map(trips_per_driver).fillna(0).astype(int)
-
-    activity_df = generate_driver_activity(driver_ids, trips_df)
-
-    if not verify_consistency(drivers_df, trips_df, activity_df):
-        print("\nconsistency issues found")
-        print("fix before continue")
-        return
-
-    print("\nsaving files")
-    save_to_csv(drivers_df, 'drivers.csv')
-    save_to_csv(trips_df, 'trips.csv')
-    save_to_csv(activity_df, 'driver_activity.csv')
-
-    print("\nstats:")
-    print(f"drivers: {len(drivers_df):,}")
-    print(f"active: {len(drivers_df[drivers_df['status']=='active']):,}")
-    print(f"inactive: {len(drivers_df[drivers_df['status']=='inactive']):,}")
-    print(f"blocked: {len(drivers_df[drivers_df['status']=='blocked']):,}")
-    print(f"trips: {len(trips_df):,}")
-    print(f"columns: {list(trips_df.columns)}")
-    print(f"avg cost: {trips_df['fare_amount'].mean():.2f} руб")
-    print(f"avg distance: {trips_df['distance_km'].mean():.1f} км")
-    print(f"unique drivers in trips: {len(trips_df['driver_id'].unique()):,}")
-    print(f"activity rows: {len(activity_df):,}")
-    print(f"unique drivers in activity: {len(activity_df['driver_id'].unique()):,}")
-    print(f"period: {activity_df['date'].min()} - {activity_df['date'].max()}")
-    print("generation success")
+    return drivers, trips, activities
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Generate synthetic taxi data')
+    parser.add_argument('--drivers', type=int, default=1000, help='Number of drivers')
+    parser.add_argument('--trips', type=int, default=50000, help='Number of trips')
+    parser.add_argument('--churn', type=float, default=0.2, help='Target churn rate')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+    
+    args = parser.parse_args()
+    
+    logging.basicConfig(level=logging.INFO)
+    
+    main(
+        n_drivers=args.drivers,
+        n_trips=args.trips,
+        churn_rate=args.churn
+    )

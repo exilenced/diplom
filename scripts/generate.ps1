@@ -2,11 +2,11 @@ python -c "
 from src.database.connection import db
 from sqlalchemy import text
 with db.get_connection() as conn:
-    conn.execute(text('TRUNCATE TABLE driver_activity CASCADE;'))
-    conn.execute(text('TRUNCATE TABLE trips CASCADE;'))
-    conn.execute(text('TRUNCATE TABLE drivers CASCADE;'))
+    conn.execute(text('truncate table driver_activity cascade;'))
+    conn.execute(text('truncate table trips cascade;'))
+    conn.execute(text('truncate table drivers cascade;'))
     conn.commit()
-    print('✅ Tables truncated')
+    print('tables truncated')
 "
 
 Remove-Item data\generated\*.csv
